@@ -26,3 +26,9 @@ install(DIRECTORY
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
+install(FILES
+  nodes/cv_bridge.py
+  nodes/cv_resize.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+

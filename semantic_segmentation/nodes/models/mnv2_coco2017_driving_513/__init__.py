@@ -3,10 +3,11 @@
 import json
 import os
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 import time
 from tensorflow.python.client import timeline
 
+tf.disable_v2_behavior()
 PATH = os.path.dirname(__file__)
 MODEL_FILENAME = "graph.pb"
 CATEGORIES_FILENAME = "categories.json"

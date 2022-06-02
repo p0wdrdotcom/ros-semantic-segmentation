@@ -39,6 +39,16 @@ if __name__ == "__main__":
         w = int(w * SCALE)
         return cv_resize.resize(cv_image, (w, h))
 
+    def up_scale(cv_image):
+        if SCALE == 1.0:
+            return cv_image
+
+        h, w = cv_image.shape[:2]
+        h = int(h / SCALE)
+        w = int(w / SCALE)
+        return cv_resize.resize(cv_image, (w, h))
+
+
     while not rospy.is_shutdown():
         rate.sleep()
 
@@ -47,12 +57,7 @@ if __name__ == "__main__":
 
         header = on_image.last_image.header
         cv_image = cv_bridge.imgmsg_to_cv2(on_image.last_image)
-
-        if SCALE != 1.0:
-            h, w = cv_image.shape[:2]
-            h = int(h * SCALE)
-            w = int(w * SCALE)
-            cv_image = cv_resize.resize(cv_image, (w, h))
+        cv_image = down_scale(cv_image)
 
         s = t.time()
         semantic = model.infer([cv_image])[0]
@@ -60,15 +65,16 @@ if __name__ == "__main__":
 
         if pub_semantic.get_num_connections() > 0:
             output_image = semantic.astype(np.uint8)
-            m = cv_bridge.cv2_to_imgmsg(semantic.astype(np.uint8), encoding = 'mono8')
+            output_image = up_scale(output_image)
+            m = cv_bridge.cv2_to_imgmsg(output_image, encoding = 'mono8')
             m.header.stamp.secs = header.stamp.secs
             m.header.stamp.nsecs = header.stamp.nsecs
             pub_semantic.publish(m)
 
         if pub_semantic_color.get_num_connections() > 0:
             output_image = model.color_map[semantic.astype(np.uint8)]
+            output_image = up_scale(output_image)
             m = cv_bridge.cv2_to_imgmsg(output_image, encoding = 'rgb8')
             m.header.stamp.secs = header.stamp.secs
             m.header.stamp.nsecs = header.stamp.nsecs
             pub_semantic_color.publish(m)
-

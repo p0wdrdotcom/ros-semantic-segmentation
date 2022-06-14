@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import threading
 import queue
 import time as t
 import numpy as np
@@ -8,86 +9,159 @@ import cv_bridge
 import cv_resize
 from sensor_msgs.msg import Image
 
-def on_image(msg):
-    with on_image.queue.mutex:
-        on_image.queue.queue.clear()
-    on_image.queue.put(msg)
 
-on_image.queue = queue.Queue()
+class SegmentationNode():
+    """docstring for SegmentationNode"""
+    def __init__(self):
+        super(SegmentationNode, self).__init__()
+
+        model_param = rospy.get_param("~model", "mnv2_bdd100k_driveable_513")
+        self._topic_image = rospy.get_param("~topic_image", "image_raw")
+        self._topic_semantic = rospy.get_param("~topic_semantic", "semantic")
+        self._topic_semantic_color = rospy.get_param("~topic_semantic_color", "semantic_color")
+
+        self._scale = rospy.get_param("~scale", 1.0)
+        rate_param = rospy.get_param("~rate", 30.0)
+        self._rate = rospy.Rate(rate_param)
+        self._output_rate = rospy.Rate(rate_param)
+
+        self._model = getattr(
+            __import__("models", globals(), locals(), fromlist=[model_param]),
+            model_param
+        ).Model()
+        rospy.set_param("semantic_categories", self._model.categories)
+
+        self._subscriber_image = rospy.Subscriber(
+            self._topic_image, Image, self._image_callback
+        )
+        self._publisher_semantic = rospy.Publisher(
+            self._topic_semantic, Image, queue_size=1
+        )
+        self._publisher_semantic_color = rospy.Publisher(
+            self._topic_semantic_color, Image, queue_size=1
+        )
+
+        self._input_image_queue = queue.Queue()
+        self._output_image_queue = queue.Queue()
+
+        self._inference_thread = threading.Thread(
+            target=self._inference_thread_func,
+            args=(),
+            daemon=True
+        )
+        self._inference_thread.start()
+
+        self._output_thread = threading.Thread(
+            target=self._output_thread_func,
+            args=(),
+            daemon=True
+        )
+        self._output_thread.start()
+
+    def close(self):
+        self._inference_thread.join()
+        self._output_thread.join()
+
+
+    def _image_callback(self, msg):
+        with self._input_image_queue.mutex:
+            self._input_image_queue.queue.clear()
+
+        header = msg.header
+        cv_image = cv_bridge.imgmsg_to_cv2(msg)
+        cv_image = self._down_scale(cv_image)
+
+        self._input_image_queue.put({
+            "header": header,
+            "cv_image": cv_image
+        })
+
+    def _output_thread_func(self):
+        while not rospy.is_shutdown():
+            self._output_rate.sleep()
+
+            next_output_image = None
+
+            try:
+                next_output_image = self._output_image_queue.get(block=False)
+            except queue.Empty:
+                pass
+
+            if next_output_image is None:
+                continue
+
+            header = next_output_image["header"]
+            semantic = next_output_image["semantic"]
+
+            if self._publisher_semantic.get_num_connections() > 0:
+                output_image = semantic.astype(np.uint8)
+                output_image = self._up_scale(output_image)
+                m = cv_bridge.cv2_to_imgmsg(output_image, encoding="mono8")
+                m.header.stamp.secs = header.stamp.secs
+                m.header.stamp.nsecs = header.stamp.nsecs
+                self._publisher_semantic.publish(m)
+
+            if self._publisher_semantic_color.get_num_connections() > 0:
+                output_image = self._model.color_map[semantic.astype(np.uint8)]
+                output_image = self._up_scale(output_image)
+                m = cv_bridge.cv2_to_imgmsg(output_image, encoding="rgb8")
+                m.header.stamp.secs = header.stamp.secs
+                m.header.stamp.nsecs = header.stamp.nsecs
+                self._publisher_semantic_color.publish(m)
+
+    def _inference_thread_func(self):
+
+        while not rospy.is_shutdown():
+            self._rate.sleep()
+
+            next_image_message = None
+
+            try:
+                next_image_message = self._input_image_queue.get(block=False)
+            except queue.Empty:
+                pass
+
+            if next_image_message is None:
+                continue
+
+            header = next_image_message["header"]
+            cv_image = next_image_message["cv_image"]
+            semantic = self._model.infer([cv_image])[0]
+
+            with self._output_image_queue.mutex:
+                self._output_image_queue.queue.clear()
+
+            self._output_image_queue.put({
+                "header": header,
+                "semantic": semantic
+            })
+
+
+    def _down_scale(self, cv_image):
+        if self._scale == 1.0:
+            return cv_image
+
+        h, w = cv_image.shape[:2]
+        h = int(h * self._scale)
+        w = int(w * self._scale)
+        return cv_resize.resize(cv_image, (w, h))
+
+    def _up_scale(self, cv_image):
+        if self._scale == 1.0:
+            return cv_image
+
+        h, w = cv_image.shape[:2]
+        h = int(h / self._scale)
+        w = int(w / self._scale)
+        return cv_resize.resize(cv_image, (w, h))
+
+
 
 if __name__ == "__main__":
-    rospy.init_node('segmentation_node')
+    rospy.init_node("segmentation_node")
 
-    MODEL = rospy.get_param('~model', 'mnv2_bdd100k_driveable_513')
-    TOPIC_IMAGE = rospy.get_param('~topic_image', 'image_raw')
-    TOPIC_SEMANTIC = rospy.get_param('~topic_semantic', 'semantic')
-    TOPIC_SEMANTIC_COLOR = rospy.get_param('~topic_semantic_color', 'semantic_color')
-    SCALE = rospy.get_param('~scale', 1.0)
-    RATE = rospy.get_param('~rate', 30.0)
+    NODE = SegmentationNode()
 
-    sub_image = rospy.Subscriber(TOPIC_IMAGE, Image, on_image)
-    pub_semantic = rospy.Publisher(TOPIC_SEMANTIC, Image, queue_size = 1)
-    pub_semantic_color = rospy.Publisher(TOPIC_SEMANTIC_COLOR, Image, queue_size = 1)
+    rospy.spin()
 
-    rate = rospy.Rate(RATE)
-
-    model = getattr(__import__('models', globals(), locals(), fromlist = [MODEL]), MODEL).Model()
-    rospy.set_param("semantic_categories", model.categories)
-
-    def down_scale(cv_image):
-        if SCALE == 1.0:
-            return cv_image
-
-        h, w = cv_image.shape[:2]
-        h = int(h * SCALE)
-        w = int(w * SCALE)
-        return cv_resize.resize(cv_image, (w, h))
-
-    def up_scale(cv_image):
-        if SCALE == 1.0:
-            return cv_image
-
-        h, w = cv_image.shape[:2]
-        h = int(h / SCALE)
-        w = int(w / SCALE)
-        return cv_resize.resize(cv_image, (w, h))
-
-
-    while not rospy.is_shutdown():
-        rate.sleep()
-
-        next_image_message = None
-
-        try:
-            next_image_message = on_image.queue.get(block=False)
-        except queue.Empty as empty:
-            pass
-
-        if next_image_message is None:
-            continue
-
-        s = t.time()
-
-        header = next_image_message.header
-        cv_image = cv_bridge.imgmsg_to_cv2(next_image_message)
-        cv_image = down_scale(cv_image)
-
-        semantic = model.infer([cv_image])[0]
-
-        if pub_semantic.get_num_connections() > 0:
-            output_image = semantic.astype(np.uint8)
-            output_image = up_scale(output_image)
-            m = cv_bridge.cv2_to_imgmsg(output_image, encoding = 'mono8')
-            m.header.stamp.secs = header.stamp.secs
-            m.header.stamp.nsecs = header.stamp.nsecs
-            pub_semantic.publish(m)
-
-        if pub_semantic_color.get_num_connections() > 0:
-            output_image = model.color_map[semantic.astype(np.uint8)]
-            output_image = up_scale(output_image)
-            m = cv_bridge.cv2_to_imgmsg(output_image, encoding = 'rgb8')
-            m.header.stamp.secs = header.stamp.secs
-            m.header.stamp.nsecs = header.stamp.nsecs
-            pub_semantic_color.publish(m)
-
-        rospy.loginfo("inference time: {}".format(t.time() - s))
+    NODE.close()
